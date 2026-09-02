@@ -296,7 +296,7 @@ function TextField({ label, value, onChange, type = "text", placeholder }) {
 /* ============================================================
    MEMBER: WELCOME
    ============================================================ */
-function Welcome({ onStart, campaign }) {
+function Welcome({ onStart, onAdminLogin, campaign }) {
   const [showForm, setShowForm] = useState(false);
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
@@ -358,6 +358,17 @@ function Welcome({ onStart, campaign }) {
           </div>
         )}
       </div>
+
+      <button
+        onClick={onAdminLogin}
+        style={{
+          position: "relative", zIndex: 1, background: "transparent", border: "none", cursor: "pointer",
+          color: T.navyBorder, fontSize: 11.5, fontFamily: "Inter, sans-serif", padding: "18px 0 0",
+          textAlign: "center", width: "100%",
+        }}
+      >
+        Staff login
+      </button>
     </div>
   );
 }
@@ -855,7 +866,7 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
     return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: T.inkSoft }}>Loading…</div>;
   }
   if (stage === "welcome" || !campaign) {
-    return <Welcome campaign={campaign} onStart={handleStart} />;
+    return <Welcome campaign={campaign} onStart={handleStart} onAdminLogin={onGoAdmin} />;
   }
 
   return (
