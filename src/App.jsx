@@ -124,16 +124,44 @@ async function saveMembers(members) {
   }
 }
 
-// Real (anonymous) Supabase Auth — no email/password collected, but each
-// device gets a stable, persistent auth.uid() that Supabase itself manages
-// (via its own session storage, not anything this app writes directly).
-// This is what profile + progress data is linked to, not the username.
-async function getOrCreateAuthUser() {
-  const { data: sessionData } = await supabase.auth.getSession();
-  if (sessionData?.session?.user) return sessionData.session.user;
-  const { data, error } = await supabase.auth.signInAnonymously();
-  if (error) throw error;
+// Real Supabase Auth with a username + password — but we never collect an
+// actual email. Supabase's auth system needs *something* email-shaped, so we
+// build a private "login handle" from the username (never shown to anyone,
+// never emailed to) and use Supabase's normal secure email/password system
+// underneath. Passwords are hashed by Supabase itself — this app never sees
+// or stores a raw password beyond the single sign-up/login call.
+const LOGIN_DOMAIN = "members.unfurlbingo.internal";
+function normalizeUsername(u) {
+  return (u || "").trim().toLowerCase().replace(/\s+/g, "");
+}
+function loginHandleFor(username) {
+  return `${normalizeUsername(username)}@${LOGIN_DOMAIN}`;
+}
+
+async function signUpMember(username, password) {
+  const { data, error } = await supabase.auth.signUp({
+    email: loginHandleFor(username),
+    password,
+  });
+  if (error) {
+    if (/already registered|already exists/i.test(error.message)) {
+      throw new Error("That username is taken — try another.");
+    }
+    throw new Error(error.message);
+  }
   return data.user;
+}
+async function signInMember(username, password) {
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: loginHandleFor(username),
+    password,
+  });
+  if (error) throw new Error("Incorrect username or password.");
+  return data.user;
+}
+async function getExistingSessionUser() {
+  const { data } = await supabase.auth.getSession();
+  return data?.session?.user || null;
 }
 
 // The profiles table holds ONLY user_id + username (no real names, no email).
@@ -307,17 +335,35 @@ function TextField({ label, value, onChange, type = "text", placeholder }) {
 /* ============================================================
    MEMBER: WELCOME
    ============================================================ */
-function Welcome({ onStart, campaign }) {
+function Welcome({ onSignUp, onLogIn, campaign }) {
   const [showForm, setShowForm] = useState(false);
+  const [mode, setMode] = useState("signup"); // signup | login
   const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const submit = () => {
+  const submit = async () => {
     const clean = username.trim();
-    if (!clean) return setError("Please make up a username.");
-    if (!/^[a-zA-Z0-9_ ]{3,20}$/.test(clean)) return setError("3–20 characters — letters, numbers, spaces or underscores.");
+    if (!clean) return setError("Please enter a username.");
+    if (!/^[a-zA-Z0-9_ ]{3,20}$/.test(clean)) return setError("Username: 3–20 characters — letters, numbers, spaces or underscores.");
+    if (!password || password.length < 6) return setError("Password needs to be at least 6 characters.");
+    if (mode === "signup" && password !== confirmPassword) return setError("Passwords don't match.");
+
     setError("");
-    onStart(clean);
+    setSubmitting(true);
+    try {
+      if (mode === "signup") {
+        await onSignUp(clean, password);
+      } else {
+        await onLogIn(clean, password);
+      }
+    } catch (e) {
+      setError(e.message || "Something went wrong — try again.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const Sparkle = ({ top, left, right, size = 18, delay = 0 }) => (
@@ -356,11 +402,32 @@ function Welcome({ onStart, campaign }) {
           <Button onClick={() => setShowForm(true)} variant="clay">Start Playing</Button>
         ) : (
           <div style={{ background: T.navyCream, borderRadius: 20, padding: 24, boxShadow: "0 12px 40px rgba(0,0,0,0.35)" }}>
-            <TextField label="Choose a username" value={username} onChange={setUsername} placeholder="sunshineyogi" />
+            <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+              {[["signup", "New here"], ["login", "I've played before"]].map(([v, l]) => (
+                <button
+                  key={v}
+                  onClick={() => { setMode(v); setError(""); }}
+                  style={{
+                    flex: 1, padding: 9, borderRadius: 10, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                    border: `1.5px solid ${mode === v ? T.teal : T.sand}`,
+                    background: mode === v ? T.tealTint : "transparent",
+                  }}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+            <TextField label="Username" value={username} onChange={setUsername} placeholder="sunshineyogi" />
+            <TextField label="Password" value={password} onChange={setPassword} placeholder="••••••••" type="password" />
+            {mode === "signup" && (
+              <TextField label="Confirm password" value={confirmPassword} onChange={setConfirmPassword} placeholder="••••••••" type="password" />
+            )}
             {error && <div style={{ color: "#B5533C", fontSize: 13, marginBottom: 14 }}>{error}</div>}
-            <Button onClick={submit} variant="clay">Continue</Button>
+            <Button onClick={submit} variant="clay" disabled={submitting}>
+              {submitting ? "One moment…" : mode === "signup" ? "Create my card" : "Log in"}
+            </Button>
             <p style={{ fontSize: 11.5, color: T.inkSoft, textAlign: "center", marginTop: 14, lineHeight: 1.5 }}>
-              Make up any username — we'll use it to save your progress on this device. No email needed.
+              Make up any username and password — no email needed. This lets you get back to your card from any device.
             </p>
           </div>
         )}
@@ -647,8 +714,14 @@ function ProfileSheet({ open, onClose, currentUsername, onSave }) {
       return;
     }
     setSaving(true);
-    await onSave(clean);
-    setSaving(false);
+    setError("");
+    try {
+      await onSave(clean);
+    } catch (e) {
+      setError(e.message || "Couldn't save — try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -730,13 +803,13 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
   useEffect(() => {
     (async () => {
       try {
-        const user = await getOrCreateAuthUser();
-        setUserId(user.id);
-        const savedUsername = await loadProfile(user.id);
-        const savedProgress = members[user.id];
-        if (savedUsername) {
-          setUsername(savedUsername);
+        const user = await getExistingSessionUser();
+        if (user) {
+          setUserId(user.id);
+          const savedUsername = await loadProfile(user.id);
+          const savedProgress = members[user.id];
           const m = savedProgress || { userId: user.id, createdAt: nowISO(), completions: [], memberRewards: [] };
+          setUsername(savedUsername || "");
           setMember(m);
           const { done } = getCompletedSet(m, campaign.challenges);
           setPrevLineCount(countLines(done, campaign.challenges).count);
@@ -758,17 +831,39 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
     await saveMembers(next);
   };
 
-  const handleStart = async (newUsername) => {
-    await saveProfile(userId, newUsername);
-    setUsername(newUsername);
-    const m = members[userId] || { userId, createdAt: nowISO(), completions: [], memberRewards: [] };
-    await persistMember(m);
+  const enterAppAs = async (user, resolvedUsername) => {
+    setUserId(user.id);
+    setUsername(resolvedUsername);
+    const m = members[user.id] || { userId: user.id, createdAt: nowISO(), completions: [], memberRewards: [] };
+    const next = { ...members, [user.id]: m };
+    setMembers(next);
+    setMember(m);
+    await saveMembers(next);
     const { done } = getCompletedSet(m, campaign.challenges);
     setPrevLineCount(countLines(done, campaign.challenges).count);
     setStage("app");
   };
 
+  const handleSignUp = async (newUsername, password) => {
+    const user = await signUpMember(newUsername, password);
+    await saveProfile(user.id, newUsername);
+    await enterAppAs(user, newUsername);
+  };
+
+  const handleLogIn = async (typedUsername, password) => {
+    const user = await signInMember(typedUsername, password);
+    const savedUsername = (await loadProfile(user.id)) || typedUsername;
+    await enterAppAs(user, savedUsername);
+  };
+
   const handleUpdateUsername = async (newUsername) => {
+    const { error } = await supabase.auth.updateUser({ email: loginHandleFor(newUsername) });
+    if (error) {
+      if (/already registered|already exists/i.test(error.message)) {
+        throw new Error("That username is taken — try another.");
+      }
+      throw new Error("Couldn't update username — try again.");
+    }
     await saveProfile(userId, newUsername);
     setUsername(newUsername);
     setShowProfile(false);
@@ -827,7 +922,7 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
     return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: T.inkSoft }}>Loading…</div>;
   }
   if (stage === "welcome" || !campaign) {
-    return <Welcome campaign={campaign} onStart={handleStart} />;
+    return <Welcome campaign={campaign} onSignUp={handleSignUp} onLogIn={handleLogIn} />;
   }
 
   return (
