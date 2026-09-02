@@ -124,38 +124,21 @@ async function saveMembers(members) {
   }
 }
 
-// Real (anonymous) Supabase Auth — no email/password collected, but each
-// device gets a stable, persistent auth.uid() that Supabase itself manages
-// (via its own session storage, not anything this app writes directly).
-// This is what profile + progress data is linked to, not the username.
-async function getOrCreateAuthUser() {
-  const { data: sessionData } = await supabase.auth.getSession();
-  if (sessionData?.session?.user) return sessionData.session.user;
-  const { data, error } = await supabase.auth.signInAnonymously();
-  if (error) throw error;
-  return data.user;
-}
-
-// The profiles table holds ONLY user_id + username (no real names, no email).
-// RLS restricts every read/write to the signed-in user's own row.
-async function loadProfile(userId) {
+// No account system — a username is just remembered on this device via
+// localStorage, and progress is saved to Supabase keyed by that username.
+// No password, no auth, no personal data beyond the made-up username itself.
+function loadDeviceMember() {
   try {
-    const { data, error } = await supabase.from("profiles").select("username").eq("user_id", userId).maybeSingle();
-    if (error || !data) return null;
-    return data.username;
+    const raw = localStorage.getItem("unfurl-bingo-device");
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
-async function saveProfile(userId, username) {
+function saveDeviceMember(username) {
   try {
-    const { error } = await supabase
-      .from("profiles")
-      .upsert({ user_id: userId, username, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-    return !error;
-  } catch {
-    return false;
-  }
+    localStorage.setItem("unfurl-bingo-device", JSON.stringify({ username }));
+  } catch {}
 }
 
 /* ============================================================
@@ -360,7 +343,7 @@ function Welcome({ onStart, campaign }) {
             {error && <div style={{ color: "#B5533C", fontSize: 13, marginBottom: 14 }}>{error}</div>}
             <Button onClick={submit} variant="clay">Continue</Button>
             <p style={{ fontSize: 11.5, color: T.inkSoft, textAlign: "center", marginTop: 14, lineHeight: 1.5 }}>
-              Make up any username — we'll use it to save your progress on this device. No email needed.
+              Make up any username — we'll remember it on this device. No email or password needed.
             </p>
           </div>
         )}
@@ -647,8 +630,14 @@ function ProfileSheet({ open, onClose, currentUsername, onSave }) {
       return;
     }
     setSaving(true);
-    await onSave(clean);
-    setSaving(false);
+    setError("");
+    try {
+      await onSave(clean);
+    } catch (e) {
+      setError(e.message || "Couldn't save — try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -718,7 +707,6 @@ function CelebrationModal({ type, onClose }) {
 function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
   const [stage, setStage] = useState("loading"); // loading | welcome | app
   const [tab, setTab] = useState("bingo");
-  const [userId, setUserId] = useState(null);
   const [username, setUsername] = useState("");
   const [member, setMember] = useState(null);
   const [celebration, setCelebration] = useState(null);
@@ -729,48 +717,55 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
 
   useEffect(() => {
     (async () => {
-      try {
-        const user = await getOrCreateAuthUser();
-        setUserId(user.id);
-        const savedUsername = await loadProfile(user.id);
-        const savedProgress = members[user.id];
-        if (savedUsername) {
-          setUsername(savedUsername);
-          const m = savedProgress || { userId: user.id, createdAt: nowISO(), completions: [], memberRewards: [] };
-          setMember(m);
-          const { done } = getCompletedSet(m, campaign.challenges);
-          setPrevLineCount(countLines(done, campaign.challenges).count);
-          setStage("app");
-        } else {
-          setStage("welcome");
-        }
-      } catch {
+      const device = await loadDeviceMember();
+      if (device?.username && members[device.username]) {
+        setUsername(device.username);
+        setMember(members[device.username]);
+        const { done } = getCompletedSet(members[device.username], campaign.challenges);
+        setPrevLineCount(countLines(done, campaign.challenges).count);
+        setStage("app");
+      } else {
         setStage("welcome");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const persistMember = async (updated) => {
-    const next = { ...members, [userId]: updated };
+  const persistMember = async (updated, key) => {
+    const next = { ...members, [key || username]: updated };
     setMembers(next);
     setMember(updated);
     await saveMembers(next);
   };
 
   const handleStart = async (newUsername) => {
-    await saveProfile(userId, newUsername);
+    let m = members[newUsername];
+    if (!m) {
+      m = { createdAt: nowISO(), completions: [], memberRewards: [] };
+    }
+    saveDeviceMember(newUsername);
     setUsername(newUsername);
-    const m = members[userId] || { userId, createdAt: nowISO(), completions: [], memberRewards: [] };
-    await persistMember(m);
+    await persistMember(m, newUsername);
     const { done } = getCompletedSet(m, campaign.challenges);
     setPrevLineCount(countLines(done, campaign.challenges).count);
     setStage("app");
   };
 
   const handleUpdateUsername = async (newUsername) => {
-    await saveProfile(userId, newUsername);
+    if (newUsername === username) {
+      setShowProfile(false);
+      return;
+    }
+    if (members[newUsername]) {
+      throw new Error("That username is taken — try another.");
+    }
+    const next = { ...members };
+    next[newUsername] = member;
+    delete next[username];
+    setMembers(next);
+    saveDeviceMember(newUsername);
     setUsername(newUsername);
+    await saveMembers(next);
     setShowProfile(false);
   };
 
@@ -1187,14 +1182,14 @@ function AdminRewards({ campaign, campaigns, setCampaigns, persist }) {
    ============================================================ */
 function AdminMembers({ campaign, members, setMembers, persistMembers }) {
   const [search, setSearch] = useState("");
-  const entries = Object.entries(members).filter(([userId]) =>
-    userId.toLowerCase().includes(search.toLowerCase())
+  const entries = Object.entries(members).filter(([username]) =>
+    username.toLowerCase().includes(search.toLowerCase())
   );
 
-  const redeem = async (userId, rewardId) => {
-    const m = members[userId];
+  const redeem = async (username, rewardId) => {
+    const m = members[username];
     const nextMR = (m.memberRewards || []).map((r) => (r.rewardId === rewardId ? { ...r, redeemedAt: nowISO() } : r));
-    const nextMembers = { ...members, [userId]: { ...m, memberRewards: nextMR } };
+    const nextMembers = { ...members, [username]: { ...m, memberRewards: nextMR } };
     setMembers(nextMembers);
     await persistMembers(nextMembers);
   };
@@ -1202,27 +1197,23 @@ function AdminMembers({ campaign, members, setMembers, persistMembers }) {
   return (
     <div style={{ padding: 20, maxWidth: 560, margin: "0 auto" }}>
       <SectionTitle>Members</SectionTitle>
-      <p style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5, margin: "-4px 0 14px" }}>
-        Usernames are private to each member's own device and aren't visible here.
-        Match a reward's redemption code against the screenshot they email in to confirm who it belongs to.
-      </p>
       <input
-        placeholder="Search by member ID"
+        placeholder="Search by username"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         style={{ width: "100%", padding: 12, borderRadius: 12, border: `1.5px solid ${T.sand}`, marginBottom: 14, boxSizing: "border-box", fontFamily: "Inter, sans-serif" }}
       />
       {entries.length === 0 && <div style={{ color: T.inkSoft, fontSize: 13 }}>No members yet.</div>}
-      {entries.map(([userId, m]) => {
+      {entries.map(([username, m]) => {
         const { done } = getCompletedSet(m, campaign?.challenges || []);
         const { count } = countLines(done, campaign?.challenges || []);
         const totalActive = campaign?.challenges.filter((c) => c.active).length || 0;
         const fullHouse = done.size >= totalActive && totalActive > 0;
         return (
-          <Card key={userId}>
+          <Card key={username}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
-                <div style={{ fontWeight: 600, fontSize: 13, fontFamily: "monospace" }}>{userId.slice(0, 8)}…</div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{username}</div>
                 <div style={{ fontSize: 11.5, color: T.inkSoft, marginTop: 2 }}>Joined {fmtDate(m.createdAt)}</div>
               </div>
               <div style={{ textAlign: "right", fontSize: 12 }}>
@@ -1242,7 +1233,7 @@ function AdminMembers({ campaign, members, setMembers, persistMembers }) {
                     {r.redeemedAt ? (
                       <span style={{ fontSize: 11, color: T.sage, fontWeight: 600 }}>Redeemed</span>
                     ) : (
-                      <Button small variant="ghost" onClick={() => redeem(userId, r.rewardId)} style={{ width: "auto" }}>Mark redeemed</Button>
+                      <Button small variant="ghost" onClick={() => redeem(username, r.rewardId)} style={{ width: "auto" }}>Mark redeemed</Button>
                     )}
                   </div>
                 ))}
