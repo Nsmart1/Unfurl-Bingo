@@ -124,66 +124,21 @@ async function saveMembers(members) {
   }
 }
 
-// Real Supabase Auth with a username + password — but we never collect an
-// actual email. Supabase's auth system needs *something* email-shaped, so we
-// build a private "login handle" from the username (never shown to anyone,
-// never emailed to) and use Supabase's normal secure email/password system
-// underneath. Passwords are hashed by Supabase itself — this app never sees
-// or stores a raw password beyond the single sign-up/login call.
-const LOGIN_DOMAIN = "members.unfurlbingo.internal";
-function normalizeUsername(u) {
-  return (u || "").trim().toLowerCase().replace(/\s+/g, "");
-}
-function loginHandleFor(username) {
-  return `${normalizeUsername(username)}@${LOGIN_DOMAIN}`;
-}
-
-async function signUpMember(username, password) {
-  const { data, error } = await supabase.auth.signUp({
-    email: loginHandleFor(username),
-    password,
-  });
-  if (error) {
-    if (/already registered|already exists/i.test(error.message)) {
-      throw new Error("That username is taken — try another.");
-    }
-    throw new Error(error.message);
-  }
-  return data.user;
-}
-async function signInMember(username, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: loginHandleFor(username),
-    password,
-  });
-  if (error) throw new Error("Incorrect username or password.");
-  return data.user;
-}
-async function getExistingSessionUser() {
-  const { data } = await supabase.auth.getSession();
-  return data?.session?.user || null;
-}
-
-// The profiles table holds ONLY user_id + username (no real names, no email).
-// RLS restricts every read/write to the signed-in user's own row.
-async function loadProfile(userId) {
+// No account system — a username is just remembered on this device via
+// localStorage, and progress is saved to Supabase keyed by that username.
+// No password, no auth, no personal data beyond the made-up username itself.
+function loadDeviceMember() {
   try {
-    const { data, error } = await supabase.from("profiles").select("username").eq("user_id", userId).maybeSingle();
-    if (error || !data) return null;
-    return data.username;
+    const raw = localStorage.getItem("unfurl-bingo-device");
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
-async function saveProfile(userId, username) {
+function saveDeviceMember(username) {
   try {
-    const { error } = await supabase
-      .from("profiles")
-      .upsert({ user_id: userId, username, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-    return !error;
-  } catch {
-    return false;
-  }
+    localStorage.setItem("unfurl-bingo-device", JSON.stringify({ username }));
+  } catch {}
 }
 
 /* ============================================================
@@ -335,35 +290,17 @@ function TextField({ label, value, onChange, type = "text", placeholder }) {
 /* ============================================================
    MEMBER: WELCOME
    ============================================================ */
-function Welcome({ onSignUp, onLogIn, campaign }) {
+function Welcome({ onStart, campaign }) {
   const [showForm, setShowForm] = useState(false);
-  const [mode, setMode] = useState("signup"); // signup | login
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
 
-  const submit = async () => {
+  const submit = () => {
     const clean = username.trim();
-    if (!clean) return setError("Please enter a username.");
-    if (!/^[a-zA-Z0-9_ ]{3,20}$/.test(clean)) return setError("Username: 3–20 characters — letters, numbers, spaces or underscores.");
-    if (!password || password.length < 6) return setError("Password needs to be at least 6 characters.");
-    if (mode === "signup" && password !== confirmPassword) return setError("Passwords don't match.");
-
+    if (!clean) return setError("Please make up a username.");
+    if (!/^[a-zA-Z0-9_ ]{3,20}$/.test(clean)) return setError("3–20 characters — letters, numbers, spaces or underscores.");
     setError("");
-    setSubmitting(true);
-    try {
-      if (mode === "signup") {
-        await onSignUp(clean, password);
-      } else {
-        await onLogIn(clean, password);
-      }
-    } catch (e) {
-      setError(e.message || "Something went wrong — try again.");
-    } finally {
-      setSubmitting(false);
-    }
+    onStart(clean);
   };
 
   const Sparkle = ({ top, left, right, size = 18, delay = 0 }) => (
@@ -402,32 +339,11 @@ function Welcome({ onSignUp, onLogIn, campaign }) {
           <Button onClick={() => setShowForm(true)} variant="clay">Start Playing</Button>
         ) : (
           <div style={{ background: T.navyCream, borderRadius: 20, padding: 24, boxShadow: "0 12px 40px rgba(0,0,0,0.35)" }}>
-            <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
-              {[["signup", "New here"], ["login", "I've played before"]].map(([v, l]) => (
-                <button
-                  key={v}
-                  onClick={() => { setMode(v); setError(""); }}
-                  style={{
-                    flex: 1, padding: 9, borderRadius: 10, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
-                    border: `1.5px solid ${mode === v ? T.teal : T.sand}`,
-                    background: mode === v ? T.tealTint : "transparent",
-                  }}
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-            <TextField label="Username" value={username} onChange={setUsername} placeholder="sunshineyogi" />
-            <TextField label="Password" value={password} onChange={setPassword} placeholder="••••••••" type="password" />
-            {mode === "signup" && (
-              <TextField label="Confirm password" value={confirmPassword} onChange={setConfirmPassword} placeholder="••••••••" type="password" />
-            )}
+            <TextField label="Choose a username" value={username} onChange={setUsername} placeholder="sunshineyogi" />
             {error && <div style={{ color: "#B5533C", fontSize: 13, marginBottom: 14 }}>{error}</div>}
-            <Button onClick={submit} variant="clay" disabled={submitting}>
-              {submitting ? "One moment…" : mode === "signup" ? "Create my card" : "Log in"}
-            </Button>
+            <Button onClick={submit} variant="clay">Continue</Button>
             <p style={{ fontSize: 11.5, color: T.inkSoft, textAlign: "center", marginTop: 14, lineHeight: 1.5 }}>
-              Make up any username and password — no email needed. This lets you get back to your card from any device.
+              Make up any username — we'll remember it on this device. No email or password needed.
             </p>
           </div>
         )}
@@ -791,7 +707,6 @@ function CelebrationModal({ type, onClose }) {
 function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
   const [stage, setStage] = useState("loading"); // loading | welcome | app
   const [tab, setTab] = useState("bingo");
-  const [userId, setUserId] = useState(null);
   const [username, setUsername] = useState("");
   const [member, setMember] = useState(null);
   const [celebration, setCelebration] = useState(null);
@@ -802,70 +717,55 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
 
   useEffect(() => {
     (async () => {
-      try {
-        const user = await getExistingSessionUser();
-        if (user) {
-          setUserId(user.id);
-          const savedUsername = await loadProfile(user.id);
-          const savedProgress = members[user.id];
-          const m = savedProgress || { userId: user.id, createdAt: nowISO(), completions: [], memberRewards: [] };
-          setUsername(savedUsername || "");
-          setMember(m);
-          const { done } = getCompletedSet(m, campaign.challenges);
-          setPrevLineCount(countLines(done, campaign.challenges).count);
-          setStage("app");
-        } else {
-          setStage("welcome");
-        }
-      } catch {
+      const device = await loadDeviceMember();
+      if (device?.username && members[device.username]) {
+        setUsername(device.username);
+        setMember(members[device.username]);
+        const { done } = getCompletedSet(members[device.username], campaign.challenges);
+        setPrevLineCount(countLines(done, campaign.challenges).count);
+        setStage("app");
+      } else {
         setStage("welcome");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const persistMember = async (updated) => {
-    const next = { ...members, [userId]: updated };
+  const persistMember = async (updated, key) => {
+    const next = { ...members, [key || username]: updated };
     setMembers(next);
     setMember(updated);
     await saveMembers(next);
   };
 
-  const enterAppAs = async (user, resolvedUsername) => {
-    setUserId(user.id);
-    setUsername(resolvedUsername);
-    const m = members[user.id] || { userId: user.id, createdAt: nowISO(), completions: [], memberRewards: [] };
-    const next = { ...members, [user.id]: m };
-    setMembers(next);
-    setMember(m);
-    await saveMembers(next);
+  const handleStart = async (newUsername) => {
+    let m = members[newUsername];
+    if (!m) {
+      m = { createdAt: nowISO(), completions: [], memberRewards: [] };
+    }
+    saveDeviceMember(newUsername);
+    setUsername(newUsername);
+    await persistMember(m, newUsername);
     const { done } = getCompletedSet(m, campaign.challenges);
     setPrevLineCount(countLines(done, campaign.challenges).count);
     setStage("app");
   };
 
-  const handleSignUp = async (newUsername, password) => {
-    const user = await signUpMember(newUsername, password);
-    await saveProfile(user.id, newUsername);
-    await enterAppAs(user, newUsername);
-  };
-
-  const handleLogIn = async (typedUsername, password) => {
-    const user = await signInMember(typedUsername, password);
-    const savedUsername = (await loadProfile(user.id)) || typedUsername;
-    await enterAppAs(user, savedUsername);
-  };
-
   const handleUpdateUsername = async (newUsername) => {
-    const { error } = await supabase.auth.updateUser({ email: loginHandleFor(newUsername) });
-    if (error) {
-      if (/already registered|already exists/i.test(error.message)) {
-        throw new Error("That username is taken — try another.");
-      }
-      throw new Error("Couldn't update username — try again.");
+    if (newUsername === username) {
+      setShowProfile(false);
+      return;
     }
-    await saveProfile(userId, newUsername);
+    if (members[newUsername]) {
+      throw new Error("That username is taken — try another.");
+    }
+    const next = { ...members };
+    next[newUsername] = member;
+    delete next[username];
+    setMembers(next);
+    saveDeviceMember(newUsername);
     setUsername(newUsername);
+    await saveMembers(next);
     setShowProfile(false);
   };
 
@@ -922,7 +822,7 @@ function MemberApp({ campaigns, members, setMembers, onGoAdmin }) {
     return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: T.inkSoft }}>Loading…</div>;
   }
   if (stage === "welcome" || !campaign) {
-    return <Welcome campaign={campaign} onSignUp={handleSignUp} onLogIn={handleLogIn} />;
+    return <Welcome campaign={campaign} onStart={handleStart} />;
   }
 
   return (
@@ -1282,14 +1182,14 @@ function AdminRewards({ campaign, campaigns, setCampaigns, persist }) {
    ============================================================ */
 function AdminMembers({ campaign, members, setMembers, persistMembers }) {
   const [search, setSearch] = useState("");
-  const entries = Object.entries(members).filter(([userId]) =>
-    userId.toLowerCase().includes(search.toLowerCase())
+  const entries = Object.entries(members).filter(([username]) =>
+    username.toLowerCase().includes(search.toLowerCase())
   );
 
-  const redeem = async (userId, rewardId) => {
-    const m = members[userId];
+  const redeem = async (username, rewardId) => {
+    const m = members[username];
     const nextMR = (m.memberRewards || []).map((r) => (r.rewardId === rewardId ? { ...r, redeemedAt: nowISO() } : r));
-    const nextMembers = { ...members, [userId]: { ...m, memberRewards: nextMR } };
+    const nextMembers = { ...members, [username]: { ...m, memberRewards: nextMR } };
     setMembers(nextMembers);
     await persistMembers(nextMembers);
   };
@@ -1297,27 +1197,23 @@ function AdminMembers({ campaign, members, setMembers, persistMembers }) {
   return (
     <div style={{ padding: 20, maxWidth: 560, margin: "0 auto" }}>
       <SectionTitle>Members</SectionTitle>
-      <p style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5, margin: "-4px 0 14px" }}>
-        Usernames are private to each member's own device and aren't visible here.
-        Match a reward's redemption code against the screenshot they email in to confirm who it belongs to.
-      </p>
       <input
-        placeholder="Search by member ID"
+        placeholder="Search by username"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         style={{ width: "100%", padding: 12, borderRadius: 12, border: `1.5px solid ${T.sand}`, marginBottom: 14, boxSizing: "border-box", fontFamily: "Inter, sans-serif" }}
       />
       {entries.length === 0 && <div style={{ color: T.inkSoft, fontSize: 13 }}>No members yet.</div>}
-      {entries.map(([userId, m]) => {
+      {entries.map(([username, m]) => {
         const { done } = getCompletedSet(m, campaign?.challenges || []);
         const { count } = countLines(done, campaign?.challenges || []);
         const totalActive = campaign?.challenges.filter((c) => c.active).length || 0;
         const fullHouse = done.size >= totalActive && totalActive > 0;
         return (
-          <Card key={userId}>
+          <Card key={username}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
-                <div style={{ fontWeight: 600, fontSize: 13, fontFamily: "monospace" }}>{userId.slice(0, 8)}…</div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{username}</div>
                 <div style={{ fontSize: 11.5, color: T.inkSoft, marginTop: 2 }}>Joined {fmtDate(m.createdAt)}</div>
               </div>
               <div style={{ textAlign: "right", fontSize: 12 }}>
@@ -1337,7 +1233,7 @@ function AdminMembers({ campaign, members, setMembers, persistMembers }) {
                     {r.redeemedAt ? (
                       <span style={{ fontSize: 11, color: T.sage, fontWeight: 600 }}>Redeemed</span>
                     ) : (
-                      <Button small variant="ghost" onClick={() => redeem(userId, r.rewardId)} style={{ width: "auto" }}>Mark redeemed</Button>
+                      <Button small variant="ghost" onClick={() => redeem(username, r.rewardId)} style={{ width: "auto" }}>Mark redeemed</Button>
                     )}
                   </div>
                 ))}
