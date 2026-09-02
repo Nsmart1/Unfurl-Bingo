@@ -363,8 +363,8 @@ function Welcome({ onStart, onAdminLogin, campaign }) {
         onClick={onAdminLogin}
         style={{
           position: "relative", zIndex: 1, background: "transparent", border: "none", cursor: "pointer",
-          color: T.navyBorder, fontSize: 11.5, fontFamily: "Inter, sans-serif", padding: "18px 0 0",
-          textAlign: "center", width: "100%",
+          color: T.navySoft, fontSize: 12.5, fontWeight: 600, fontFamily: "Inter, sans-serif", padding: "18px 0 4px",
+          textAlign: "center", width: "100%", textDecoration: "underline",
         }}
       >
         Staff login
